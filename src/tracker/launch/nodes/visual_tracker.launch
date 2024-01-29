@@ -1,0 +1,25 @@
+<launch>
+  <node name='visual_tracker' pkg="ros_tracker" type="visual_tracker_map.py" output="screen">
+    <param name="image_topic" value="/camera/rgb/image_color" />
+    <param name="point_cloud_topic" value="/camera/depth/points" />
+    <!-- color or the target in HSV color space -->
+    <!-- <rosparam ns='target'>
+      upper : [0, 120, 100]
+      lower : [9, 255, 255]
+    </rosparam> -->
+    <rosparam ns='pictureDimensions'>
+      <!-- Picture dimensions in pixel -->
+      <!-- pictureHeight: 480
+      pictureWidth: 640 -->
+      pictureHeight: 1080
+      pictureWidth: 1920
+      <!-- Viewing angle of the camera in one direction in Radians -->
+      <!-- 摄像头在一个方向上的视角，单位为弧度）这个变量描述了摄像头在水平或垂直方向上的可视范围，通常用弧度（radians）来表示。 -->
+      <!-- 视角是指摄像头或相机能够捕捉到的场景的范围。视角越大，摄像头能够捕捉到的场景范围就越广。视角通常以弧度或度来表示。 -->
+      <!-- verticalAngle: 0.43196898986859655
+      horizontalAngle: 0.5235987755982988 -->
+      verticalAngle: 0.42
+      horizontalAngle: 0.67
+    </rosparam>
+  </node>
+</launch>

@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+    <include file="$(find ros_tracker)/launch/sim_world/load_gazebo.launch"/>
+    <include file='$(find ros_tracker)/launch/nodes/visual_tracker.launch' />
+    <include file='$(find ros_tracker)/launch/nodes/follower.launch' />
+    <include file='$(find ros_tracker)/launch/sim_world/load_navigation.launch'/>
+</launch>
+ 

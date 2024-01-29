@@ -1,0 +1,11 @@
+DEEPSORT:
+  #ckpt.t7 这是一个特征提取网络的权重文件，特征提取网络训练好了以后会生成这个权重文件，
+  # 方便在目标追踪的时候提取目标框中的特征，在目标追踪的时候避免ID交换。
+  REID_CKPT: '/deep_sort_pytorch/deep_sort/deep/checkpoint/ckpt.t7'
+  MAX_DIST: 0.1 # The matching threshold. Samples with larger distance are considered an invalid match
+  MIN_CONFIDENCE: 0.4 # Minimum class confidence to consider
+  MAX_IOU_DISTANCE: 0.7 # Gating threshold. Associations with cost larger than this value are disregarded.
+  MAX_AGE: 30 # Maximum number of missed misses before a track is deleted
+  N_INIT: 3 # Number of frames that a track remains in initialization phase
+  NN_BUDGET: 100 # Maximum size of the appearance descriptors gallery
+  

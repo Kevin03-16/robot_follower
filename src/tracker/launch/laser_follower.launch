@@ -1,0 +1,4 @@
+<launch>
+  <include file='$(find ros_tracker)/launch/nodes/laser_tracker.launch' />
+  <include file='$(find ros_tracker)/launch/nodes/follower.launch' />
+</launch>
