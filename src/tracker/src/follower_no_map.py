@@ -7,10 +7,10 @@ import time
 import numpy as np
 from sensor_msgs.msg import LaserScan, JointState
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist, Vector3, PoseStamped, Point
+from geometry_msgs.msg import Twist, Vector3, PoseStamped, PointStamped, Point
 from dwa_planner import DWAPlanner
-import fcl
 from ros_tracker.msg import position as PositionMsg
+from ros_tracker.msg import LastMoveAction, LastMoveResult
 from std_msgs.msg import String as StringMsg
 import tf
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
@@ -26,28 +26,20 @@ class Follower:
 		self.max_gimbal_speed = rospy.get_param('~maxGimbalSpeed')
 		self.controllButtonIndex = rospy.get_param('~controllButtonIndex')
 		self.radius = rospy.get_param('~car_radius')
-		# carshape = rospy.get_param('~car_param/shape')
-		# self.car_collision_object = fcl.CollisionObject(fcl.Box(carshape[0], carshape[1], carshape[2]), fcl.Transform())
-		# # 创建碰撞对象
-		# self.obstacles = np.zeros([0, 3])
-		# self.laser_collision_object = fcl.CollisionObject(fcl.FCLGeometry.createPointCloud(self.obstacles))
-		# # 创建碰撞请求对象
-		# self.request = fcl.CollisionRequest()
-		# # 创建碰撞结果对象
-		# self.result = fcl.CollisionResult()
-
 		self.active=False
+		self.inflation = 4 * self.radius
 		self.tf_listener = tf.TransformListener()
 		self.pos_in_camera = PoseStamped()
-		self.tf_listener.waitForTransform("base_link", "camera_link", rospy.Time(), rospy.Duration(4.0))
+		self.obs = PointStamped()
+		self.tf_listener.waitForTransform("base_link", "base_scan", rospy.Time(), rospy.Duration(4.0))
 		self.cmdVelPublisher = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
 		self.gimbalPublisher = rospy.Publisher("/joint_states", JointState, queue_size=10)
 		self.scan_sub = rospy.Subscriber("/scan", LaserScan, self.scan_callback)
-		# self.goal_pub = rospy.Publisher('move_base_simple/goal', PoseStamped, queue_size=1)
+		self.action_server = actionlib.SimpleActionServer('last_position', LastMoveAction, self.action_execute, False)
+		self.action_server.start()
+
 		self.odom_sub = rospy.Subscriber("/odom", Odometry, self.odom_callback)
-		# the topic for the tracker that gives us the current position of the object we are following
 		self.positionSubscriber = rospy.Subscriber('/object_tracker/current_position', PositionMsg, self.positionUpdateCallback)
-		# an info string from that tracker. E.g. telling us if we lost the object
 		self.trackerInfoSubscriber = rospy.Subscriber('/object_tracker/info', StringMsg, self.trackerInfoCallback)
 
 		# PID parameters first is angular, dist
@@ -61,6 +53,7 @@ class Follower:
 		self.Person_detection = False
 		self.joint_state = JointState()
 		self.joint_state.name = 'camera_joint'
+		self.start_detection = False
 		self.searching_velocity = Twist()	
 		self.searching_velocity.linear = Vector3(0,0,0.)
 		self.searching_velocity.angular= Vector3(0., 0.,1)
@@ -70,7 +63,7 @@ class Follower:
 		self.robot_y = 0.0
 		self.robot_yaw = 0.0
 		self.tracking_velocity = Twist()	
-		self.obstacles = None 
+		self.obstacles = [] 
 		self.path_datection_terminate = False
 		self.path_detection_thread.start()
 		rospy.on_shutdown(self.on_shutdown_callback)
@@ -80,6 +73,11 @@ class Follower:
 		if not self.path_datection_terminate:
 			self.path_datection_terminate = True
 
+	def action_execute(self, goal):
+		cmd_vel = self.pid_control(goal.distance + self.targetDist + 1, 2 * goal.angleX)
+		self.tracking_velocity.linear = Vector3(cmd_vel[0], 0, 0.0)
+		self.tracking_velocity.angular= Vector3(0., 0.,cmd_vel[1])
+		self.cmdVelPublisher.publish(self.tracking_velocity)
 
 	def odom_callback(self, data): # frame_id odom
         # 从里程计信息中提取机器人当前位置和方向
@@ -92,49 +90,55 @@ class Follower:
 	def scan_callback(self, scan_msg):# frame_id base_scan
 		self.scan_data = np.array(scan_msg.ranges)
 		self.obstacle_position_detection(scan_msg)
-		# self.laser_collision_object = fcl.CollisionObject(fcl.FCLGeometry.createPointCloud(self.obstacles))
-		# self.collision_object.setGeom(fcl.FCLGeometry.createPointCloud(self.obstacles))
 
 
 	def obstacle_position_detection(self, scan_msg):
-		obstacles = np.zeros([0, 3])
+		self.obstacles = []
+		self.start_detection = False
 		# 处理激光雷达的数据，提取障碍物信息
-		for i, r in enumerate(scan_msg.ranges):
-			if 0.01 < r < scan_msg.range_max:
-				# 通过范围判断是否是障碍物
-				angle = scan_msg.angle_min + i * scan_msg.angle_increment
-				obstacle_x = (r - self.radius) * math.cos(angle)
-				obstacle_y = (r - self.radius) * math.sin(angle) 
-				obstacle_z = 0.1
-				self.obstacles = np.vstack((obstacles, [obstacle_x, obstacle_y, obstacle_z]))
-			elif r < self.radius:
-				self.active = False
-				self.stopMoving()
-				break
+		if min(scan_msg.ranges) <= self.inflation:
+			self.active = False
+			self.stopMoving()
+		else:
+			for i, r in enumerate(scan_msg.ranges):
+				if self.inflation < r < scan_msg.range_max:
+					rospy.logwarn_once('start detecting')
+					# 通过范围判断是否是障碍物
+					# rospy.logwarn(r)
+					angle = scan_msg.angle_min + i * scan_msg.angle_increment
+					self.obs.header.stamp = rospy.Time.now()
+					self.obs.header.frame_id = "base_scan"  # 相机坐标系
+					self.obs.point = Point(x=(r - self.inflation) * math.cos(angle), y=(r - self.inflation) * math.sin(angle), z=0.0) 
+					obs_in_base = self.tf_listener.transformPoint("base_link", self.obs)
+					# rospy.logwarn(obs_in_base)
+					self.obstacles.append([obs_in_base.point.x, obs_in_base.point.y, obs_in_base.point.z])
+			self.start_detection = True
+
 
 	def path_detection(self):
-		while (not self.path_datection_terminate) & (self.obstacles is not None):
-			# X_cur = [self.robot_x, self.robot_y, self.robot_yaw, self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
-			X_cur = [0, 0, self.robot_yaw, self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
-			u = [self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
-			traj_pred = self.dwa.Calculate_Traj(X_cur, u)
-			# self.car_collision_object.setTransform(fcl.Transform())
-			# for i in range(0, len(traj_pred)):
-			# 	translation = np.array([traj_pred[i, 0], traj_pred[i,1], 0])
-			# 	rotation = np.array(quaternion_from_euler(0, 0, self.tracking_velocity.angular.z))
-				# pose_transform = fcl.Transform(rotation, translation)
-				# self.car_collision_object.setTransform(pose_transform)
-				# fcl.collide(self.car_collision_object, self.laser_collision_object, self.request, self.result)
-				# 检测机器人路径
-				# if self.result.is_collision:
-			if self.path_collision(traj_pred):
-				rospy.logwarn('collision~~~~~')
-				# 如果有障碍物，采用DWA算法避障
-				cmd_vel = self.dwa.dwa_plan(X_cur, u, self.obstacles)
-				self.tracking_velocity.linear = Vector3(cmd_vel[0],0,0.)
-				self.tracking_velocity.angular= Vector3(0., 0.,cmd_vel[1])
-				self.cmdVelPublisher.publish(self.tracking_velocity)
-			time.sleep(1)  # 等待一秒钟再进行下一次检测
+		while not self.path_datection_terminate:
+			if self.start_detection:
+				rospy.logwarn_once('detecting collision~~~~~')
+				# X_cur = [self.robot_x, self.robot_y, self.robot_yaw, self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
+				X_cur = [0, 0, self.robot_yaw, self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
+				u = [self.tracking_velocity.linear.x, self.tracking_velocity.angular.z]
+				traj_pred = self.dwa.Calculate_Traj(X_cur, u)
+				# self.car_collision_object.setTransform(fcl.Transform())
+				# for i in range(0, len(traj_pred)):
+				# 	translation = np.array([traj_pred[i, 0], traj_pred[i,1], 0])
+				# 	rotation = np.array(quaternion_from_euler(0, 0, self.tracking_velocity.angular.z))
+					# pose_transform = fcl.Transform(rotation, translation)
+					# self.car_collision_object.setTransform(pose_transform)
+					# fcl.collide(self.car_collision_object, self.laser_collision_object, self.request, self.result)
+					# 检测机器人路径
+					# if self.result.is_collision:
+				if self.path_collision(traj_pred):
+					# 如果有障碍物，采用DWA算法避障
+					cmd_vel = self.dwa.dwa_plan(X_cur, u, self.obstacles)
+					self.tracking_velocity.linear = Vector3(cmd_vel[0],0,0.)
+					self.tracking_velocity.angular= Vector3(0., 0.,cmd_vel[1])
+					self.cmdVelPublisher.publish(self.tracking_velocity)
+				time.sleep(1)  # 等待一秒钟再进行下一次检测
 
 	def path_collision(self, traj_pred):
 		minDist = self.dwa.Obstacle_Cost(traj_pred,self.obstacles)
@@ -152,13 +156,7 @@ class Follower:
 			self.cmdVelPublisher.publish(self.searching_velocity)
 		elif info.data == 'Loss_target':
 			rospy.logwarn_once(info.data)
-			self.active = False
 			self.Person_detection = False
-			self.goal_pos = self.predict_target_position(self.goal_pos, time_interval=0.1)
-			cmd_vel = self.pid_control(self.goal_pos.distance, self.goal_pos.angleX)
-			self.tracking_velocity.linear = Vector3(cmd_vel[0],0,0.)
-			self.tracking_velocity.angular= Vector3(0., 0.,cmd_vel[1])
-			self.cmdVelPublisher.publish(self.tracking_velocity)
 		elif info.data == 'People_detected':
 			if not self.Person_detection:
 				rospy.logwarn_once(info.data)
@@ -166,12 +164,11 @@ class Follower:
 				self.active = True
 				self.stopMoving()
 
-	def predict_target_position(self, cur, time_interval):
+	def predict_target_position(self, time_interval):
 		# 预测目标在未来的位置
-		angleX = cur.angleX + self.tracking_velocity.angular.z * time_interval
-		distance = cur.distance + self.tracking_velocity.linear.x * time_interval
-		predicted_position = PositionMsg(angleX, 0, 0, 0, distance)
-		return predicted_position
+		angleX = self.goal_pos.angleX + self.tracking_velocity.angular.z * time_interval
+		distance = self.goal_pos.distance + self.tracking_velocity.linear.x * time_interval
+		self.goal_pos = PositionMsg(angleX, 0, 0, 0, distance)
 		# we do not handle any info from the object tracker specifically at the moment. just ignore that we lost the object for example
 	
 	def pid_control(self, distance, angleX):

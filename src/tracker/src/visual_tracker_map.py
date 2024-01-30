@@ -5,8 +5,13 @@ import cv2
 import sys
 import torch
 import pyrealsense2 as rs
+import threading
+from actionlib import GoalStatus
+import actionlib
 # from ros_tracker.action import last_move as LastMoveAction
 import random
+import time
+import math
 import numpy as np
 # message_filters是一个用于roscpp和rospy的实用程序库。 它集合了许多的常用的消息“过滤”算法。
 # 消息过滤器message_filters类似一个消息缓存，当消息到达消息过滤器的时候，可能并不会立即输出，而是在稍后的时间点里满足一定条件下输出。
@@ -22,9 +27,12 @@ from deep_sort_pytorch.utils.parser import get_config
 from deep_sort_pytorch.deep_sort import DeepSort
 import rospy
 from std_msgs.msg import String as StringMsg
+from geometry_msgs.msg import PointStamped, PoseStamped
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
 from ros_tracker.msg import position as PositionMsg
+
+import tf
 
 device = select_device('0') if torch.cuda.is_available() else "cpu"
 
@@ -77,13 +85,14 @@ class visualTracker():
         # precompute tangens since thats all we need anyways:
         self.tanVertical = np.tan(vertAngle)
         self.tanHorizontal = np.tan(horizontalAngle)
+        self.detla_x, self.delta_y = None, None
         self.lastPosition =None
         self.cam_image = None
-        self.lossTarget = False
+        self.arrivedLastPos = False
+        self.tf_listener = tf.TransformListener()
         # one callback that deals with depth and rgb at the same time
-        image_sub = message_filters.Subscriber("/camera/rgb/image_raw", Image)
-        dep_sub = message_filters.Subscriber("/camera/depth/image_raw", Image)
-        self.positionPublisher = rospy.Publisher('/object_tracker/current_position', PositionMsg, queue_size=3)
+        image_sub = message_filters.Subscriber("/camera/rgb/image_raw", Image) #  frame_id: "camera_rgb_optical_frame"
+        dep_sub = message_filters.Subscriber("/camera/depth/image_raw", Image) #  frame_id: "camera_rgb_optical_frame"
         '''
         如果需要绝对时间同步，那么需要时间戳相同
         TimeSynchronizer过滤器通过包含在其头中的时间戳来同步输入通道
@@ -91,14 +100,15 @@ class visualTracker():
         '''
         self.timeSynchronizer = message_filters.ApproximateTimeSynchronizer([image_sub, dep_sub], 10, 0.5)
         self.timeSynchronizer.registerCallback(self.detector_tracker)
+        self.positionPublisher = rospy.Publisher('/object_tracker/current_position', PositionMsg, queue_size=3)
         self.infoPublisher = rospy.Publisher('/object_tracker/info', StringMsg, queue_size=3)
         self.image_pub = rospy.Publisher("cv_bridge_image", Image, queue_size=1)
 
-        
     def publishPosition(self, pos):
         # calculate the angles from the raw position
         angleX = self.calculateAngleX(pos)
         angleY = self.calculateAngleY(pos)
+
         # publish the position (angleX, angleY, distance)
         posMsg = PositionMsg(angleX, angleY, pos[0][0], pos[0][1], pos[1])
         self.positionPublisher.publish(posMsg)
@@ -115,9 +125,8 @@ class visualTracker():
         if self.lastPosition is not None:
             # unpack positions
             ((PcenterX, PcenterY), Pdist)=self.lastPosition
-            self.detla_dist = dist - Pdist
-            self.x_dir = self.calculateAngleX(pos) - self.calculateAngleX(self.lastPosition)
-            self.y_dir = self.calculateAngleX(pos) - self.calculateAngleX(self.lastPosition)
+            self.detla_x = dist - Pdist
+            self.delta_y= dist * math.tan(self.calculateAngleX(pos)) - Pdist * math.tan(self.calculateAngleX(self.lastPosition))
             # distance changed to much
             # if abs(dist-Pdist)>0.5:
             #     print("2")
@@ -194,16 +203,6 @@ class visualTracker():
         # cv2.putText(canvas, str(camera_xyz), (ux+20, uy+10), 0, 1,
         #                             [225, 255, 255], thickness=2, lineType=cv2.LINE_AA)#标出坐标
         return ([camera_xyz[0], camera_xyz[1]], camera_xyz[2])
-
-    def action_cmd_send(self):
-        self.action_client.wait_for_server()
-        self.action_goal.distance = self.lastPosition[1]
-        self.action_goal.angleX = self.calculateAngleX(self.lastPosition)
-        if self.accived:
-            return
-        else:
-            self.action_client.send_goal(self.action_goal)  
-            self.action_client.wait_for_result()
 
     def image_process(self):
         im = self.cam_image[:, :, 0:3]

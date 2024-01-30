@@ -11,6 +11,7 @@ from geometry_msgs.msg import Twist, Vector3, PoseStamped
 from dwa_planner import DWAPlanner
 import tf
 import tf2_geometry_msgs
+from actionlib_msgs.msg import GoalStatus
 from ros_tracker.msg import position as PositionMsg
 from std_msgs.msg import String as StringMsg
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
@@ -33,6 +34,7 @@ class Follower:
 		self.odom_sub = rospy.Subscriber("/odom", Odometry, self.odom_callback)
 		self.trackerInfoSubscriber = rospy.Subscriber('/object_tracker/info', StringMsg, self.trackerInfoCallback)
 
+		self.buffer = np.zeros((0, 2))
 		# PID parameters first is angular, dist
 		self.targetDist = rospy.get_param('~targetDist')
 		self.dwa = DWAPlanner(param=rospy.get_param('~dwa_param'))
@@ -51,14 +53,16 @@ class Follower:
 		self.robot_x = 0.0
 		self.robot_y = 0.0
 		self.robot_yaw = 0.0
-		self.tracking_velocity = Twist()	
-
+		self.tracking_velocity = Twist()
+		PID_param = rospy.get_param('~PID_controller')	
+		self.PID_controller = simplePID([0, self.targetDist], PID_param['P'], PID_param['I'], PID_param['D'])
 		self.move_base_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
 		self.move_base_goal = MoveBaseGoal()
 		self.move_base_client.wait_for_server()
 		self.tf_buffer = tf2_ros.Buffer()
 		self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-		self.target = PoseStamped()
+		self.goal_in_map = PoseStamped()
+		self.goal_in_camera = PoseStamped()
 
 	def odom_callback(self, data):
         # 从里程计信息中提取机器人当前位置和方向
@@ -67,29 +71,53 @@ class Follower:
 		orientation_q = data.pose.pose.orientation
 		_, _, self.robot_yaw = euler_from_quaternion([orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w])
 
+	def send_move_base_goal(self):
+		self.move_base_goal.target_pose.header.frame_id = 'map'
+		self.move_base_goal.target_pose.pose = self.goal_in_map.pose
+		self.move_base_client.cancel_goal()
+		self.move_base_client.send_goal(self.move_base_goal)
+		# if self.move_base_client.get_state() == GoalStatus.SUCCEEDED:
+		# 	self.buffer = []
+		# else:
+		self.move_base_client.wait_for_result()
+
+	def pid_control(self, distance, angleX):
+		rospy.loginfo('Angle: {}, Distance: {}, '.format(angleX, distance))
+		
+		# call the PID controller to update it and get new speeds
+		[uncliped_ang_speed, uncliped_lin_speed] = self.PID_controller.update([angleX, distance])
+		# [uncliped_y_ang_speed, _] = self.PID_controller.update([angleY, distance])
+		
+		# clip these speeds to be less then the maximal speed specified above
+		angularSpeed = np.clip(-uncliped_ang_speed, -self.max_speed, self.max_speed)
+		linearSpeed  = np.clip(-uncliped_lin_speed, -self.max_speed, self.max_speed)
+		return [linearSpeed, angularSpeed]
+	
 	def positionUpdateCallback(self, position):
-		self.goal_pos = position
-		self.target.header.frame_id = 'base_link'
-		self.target.pose.position.x = position.distance 
-		self.target.pose.position.y = (position.distance) * math.tan(-position.angleX)
-		self.target.pose.position.z = 0
+		self.goal_in_camera.header.frame_id = 'camera_link'
+		self.goal_in_camera.pose.position.x = position.distance 
+		self.goal_in_camera.pose.position.y = (position.distance) * math.tan(position.angleX)
+		self.goal_in_camera.pose.position.z = 0
 		q = quaternion_from_euler(0.0, 0.0, position.angleX)
-		self.target.pose.orientation.x = q[0]
-		self.target.pose.orientation.y = q[1]
-		self.target.pose.orientation.z = q[2]
-		self.target.pose.orientation.w = q[3]
+		self.goal_in_camera.pose.orientation.x = q[0]
+		self.goal_in_camera.pose.orientation.y = q[1]
+		self.goal_in_camera.pose.orientation.z = q[2]
+		self.goal_in_camera.pose.orientation.w = q[3]
 		try:
-			transform = self.tf_buffer.lookup_transform('map', 'base_link', rospy.Time(0), rospy.Duration(1.0))
-			target_in_map = tf2_geometry_msgs.do_transform_pose(self.target, transform)
+			transform = self.tf_buffer.lookup_transform('map', 'camera_link', rospy.Time(0), rospy.Duration(1.0))
+			self.goal_in_map = tf2_geometry_msgs.do_transform_pose(self.target, transform)
 		except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
 			rospy.logerr(f"Failed to transform the goal: {e}")
 			exit()
-		self.move_base_goal.target_pose.header.frame_id = 'map'
-		self.move_base_goal.target_pose.pose = target_in_map.pose
-		self.move_base_client.cancel_goal()
-		self.move_base_client.send_goal(self.move_base_goal)
-		self.move_base_client.wait_for_result()
-	
+
+		if self.active:
+			cmd_vel = self.pid_control(position.distance, position.angleX)
+			self.tracking_velocity.linear = Vector3(cmd_vel[0],0,0.)
+			self.tracking_velocity.angular= Vector3(0., 0.,cmd_vel[1])
+			self.cmdVelPublisher.publish(self.tracking_velocity)
+			self.joint_state.position = [position.angleY]
+			self.gimbalPublisher.publish(self.joint_state)
+
 	def trackerInfoCallback(self, info):
 		if info.data == 'No_people':
 			rospy.logwarn_once(info.data)
@@ -99,8 +127,6 @@ class Follower:
 			rospy.logwarn_once(info.data)
 			self.active = False
 			self.Person_detection = False
-			self.goal_pos = self.predict_target_position(time_interval=2)
-			self.positionUpdateCallback(self.goal_pos)
 		elif info.data == 'People_detected':
 			if not self.Person_detection:
 				rospy.logwarn_once(info.data)
@@ -110,10 +136,9 @@ class Follower:
 
 	def predict_target_position(self, time_interval):
 		# 预测目标在未来的位置
-		angleX = self.tracking_velocity.angular.z * time_interval
-		distance = self.tracking_velocity.linear.x * time_interval
-		predicted_position = PositionMsg(angleX, 0, 0, 0, distance)
-		return predicted_position
+		angleX = self.goal_pos.angleX + self.tracking_velocity.angular.z * time_interval
+		distance = self.goal_pos.distance + self.tracking_velocity.linear.x * time_interval
+		self.goal_pos = PositionMsg(angleX, 0, 0, 0, distance)
 		# we do not handle any info from the object tracker specifically at the moment. just ignore that we lost the object for example
 		
 	def stopMoving(self):

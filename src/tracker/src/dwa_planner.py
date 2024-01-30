@@ -1,6 +1,7 @@
 import numpy as np
 from math import *
- 
+import rospy
+
 #参数设置
 class DWAPlanner():
 
@@ -38,7 +39,7 @@ class DWAPlanner():
         MinDistance = float('Inf')          #初始化时候机器人周围无障碍物所以最小距离设为无穷
         for i in range(len(Pos)):           #对每一个位置点循环
             for j in range(len(Obstacle)):  #对每一个障碍物循环
-                Current_Distance = sqrt((Pos[i,0]-Obstacle[j,0])**2+(Pos[i,1]-Obstacle[j,1])**2)  #求出每个点和每个障碍物距离
+                Current_Distance = sqrt((Pos[i,0]-Obstacle[j][0])**2+(Pos[i,1]-Obstacle[j][1])**2)  #求出每个点和每个障碍物距离
                 if Current_Distance < self.radius + 0.5:            #如果小于机器人自身的半径那肯定撞到障碍物了返回的评价值自然为无穷
                     return float('Inf')
                 if Current_Distance < MinDistance:

@@ -85,9 +85,10 @@ class visualTracker():
         # precompute tangens since thats all we need anyways:
         self.tanVertical = np.tan(vertAngle)
         self.tanHorizontal = np.tan(horizontalAngle)
+        self.detla_x, self.delta_y = None, None
         self.lastPosition =None
         self.cam_image = None
-        self.lossTarget = False
+        self.arrivedLastPos = False
         self.tf_listener = tf.TransformListener()
         # one callback that deals with depth and rgb at the same time
         image_sub = message_filters.Subscriber("/camera/rgb/image_raw", Image) #  frame_id: "camera_rgb_optical_frame"
@@ -102,8 +103,9 @@ class visualTracker():
         self.positionPublisher = rospy.Publisher('/object_tracker/current_position', PositionMsg, queue_size=3)
         self.infoPublisher = rospy.Publisher('/object_tracker/info', StringMsg, queue_size=3)
         self.image_pub = rospy.Publisher("cv_bridge_image", Image, queue_size=1)
-        self.action_client = actionlib.SimpleActionClient('target_predict', LastMoveAction)
+        self.action_client = actionlib.SimpleActionClient('last_position', LastMoveAction)
         self.action_goal = LastMoveGoal()
+        self.action_client.wait_for_server()
 
     def publishPosition(self, pos):
         # calculate the angles from the raw position
@@ -126,9 +128,8 @@ class visualTracker():
         if self.lastPosition is not None:
             # unpack positions
             ((PcenterX, PcenterY), Pdist)=self.lastPosition
-            self.detla_dist = dist - Pdist
-            self.x_dir = self.calculateAngleX(pos) - self.calculateAngleX(self.lastPosition)
-            self.y_dir = self.calculateAngleX(pos) - self.calculateAngleX(self.lastPosition)
+            self.detla_x = dist - Pdist
+            self.delta_y= dist * math.tan(self.calculateAngleX(pos)) - Pdist * math.tan(self.calculateAngleX(self.lastPosition))
             # distance changed to much
             # if abs(dist-Pdist)>0.5:
             #     print("2")
@@ -207,14 +208,16 @@ class visualTracker():
         return ([camera_xyz[0], camera_xyz[1]], camera_xyz[2])
 
     def action_cmd_send(self):
-        self.action_client.wait_for_server()
-        self.action_goal.distance = self.lastPosition[1]
-        self.action_goal.angleX = self.calculateAngleX(self.lastPosition)
-        if self.accived:
-            return
-        else:
+        if not self.arrivedLastPos:
+            self.action_goal.distance = self.lastPosition[1]
+            self.action_goal.angleX = self.calculateAngleX(self.lastPosition)
+            self.action_goal.delta_x = self.detla_x
+            self.action_goal.delta_y = self.delta_y
             self.action_client.send_goal(self.action_goal)  
             self.action_client.wait_for_result()
+            if self.action_client.get_state() == GoalStatus.SUCCEEDED:
+                self.arrivedLastPos = True
+                self.lastPosition = None
 
     def image_process(self):
         im = self.cam_image[:, :, 0:3]
@@ -258,6 +261,7 @@ class visualTracker():
                 self.infoPublisher.publish('No_people')
             else:
                 self.infoPublisher.publish('Loss_target')
+                self.action_cmd_send()
         else:
             self.infoPublisher.publish('People_detected')
             self.tracker(pred, im, img, depthFrame)
