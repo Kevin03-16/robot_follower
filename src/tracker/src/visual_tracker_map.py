@@ -6,7 +6,7 @@ import sys
 import torch
 import pyrealsense2 as rs
 import threading
-from actionlib import GoalStatus
+from move_base_msgs.msg import MoveBaseActionResult
 import actionlib
 # from ros_tracker.action import last_move as LastMoveAction
 import random
@@ -31,7 +31,7 @@ from geometry_msgs.msg import PointStamped, PoseStamped
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
 from ros_tracker.msg import position as PositionMsg
-
+from ros_tracker.msg import delta as DeltaMsg
 import tf
 
 device = select_device('0') if torch.cuda.is_available() else "cpu"
@@ -71,13 +71,16 @@ class visualTracker():
         self.half = half
         self.deepsort = deepsort
         self.yolo = yolo
+        self.x_dir, self.y_dir = 0, 0
+        self.rate = rospy.Rate(1)  # 设置发布频率为1Hz
         # self.realsense = realsense
         self.imgsz = 640
         self.names = self.yolo.module.names if hasattr(self.yolo, 'module') else self.yolo.names
         self.colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(self.names))]  
 
-        self.rate = rospy.Rate(5)
+        self.rate = rospy.Rate(10)
         self.bridge = CvBridge()
+        self.loss_target_count = 0
         self.pictureHeight = rospy.get_param('~pictureDimensions/pictureHeight')
         self.pictureWidth = rospy.get_param('~pictureDimensions/pictureWidth')
         vertAngle =rospy.get_param('~pictureDimensions/verticalAngle')
@@ -85,11 +88,12 @@ class visualTracker():
         # precompute tangens since thats all we need anyways:
         self.tanVertical = np.tan(vertAngle)
         self.tanHorizontal = np.tan(horizontalAngle)
-        self.detla_x, self.delta_y = None, None
+        
         self.lastPosition =None
         self.cam_image = None
         self.arrivedLastPos = False
         self.tf_listener = tf.TransformListener()
+        self.move_base_sub = rospy.Subscriber('/move_base/result', MoveBaseActionResult, self.move_base_status_callback)
         # one callback that deals with depth and rgb at the same time
         image_sub = message_filters.Subscriber("/camera/rgb/image_raw", Image) #  frame_id: "camera_rgb_optical_frame"
         dep_sub = message_filters.Subscriber("/camera/depth/image_raw", Image) #  frame_id: "camera_rgb_optical_frame"
@@ -103,41 +107,43 @@ class visualTracker():
         self.positionPublisher = rospy.Publisher('/object_tracker/current_position', PositionMsg, queue_size=3)
         self.infoPublisher = rospy.Publisher('/object_tracker/info', StringMsg, queue_size=3)
         self.image_pub = rospy.Publisher("cv_bridge_image", Image, queue_size=1)
+        # self.deltaPublisher = rospy.Publisher('/object_tracker/delta_Info', DeltaMsg, queue_size=3)
 
+    def move_base_status_callback(self, msg):
+        if msg.status.status == 3:
+            self.lastPosition = None
+            rospy.loginfo("Move_base execution succeeded!")
+            
     def publishPosition(self, pos):
         # calculate the angles from the raw position
         angleX = self.calculateAngleX(pos)
         angleY = self.calculateAngleY(pos)
-
         # publish the position (angleX, angleY, distance)
         posMsg = PositionMsg(angleX, angleY, pos[0][0], pos[0][1], pos[1])
         self.positionPublisher.publish(posMsg)
+        self.rate.sleep()
 
     def checkPosPlausible(self, pos):
         '''Checks if a position is plausible. i.e. close enough to the last one.'''
-
-        # for the first scan we cant tell
-        # if self.lastPosition is None:
-        #     return False
         ((centerX, centerY), dist)=pos	
         if np.isnan(dist):
             return False
         if self.lastPosition is not None:
             # unpack positions
             ((PcenterX, PcenterY), Pdist)=self.lastPosition
-            self.detla_x = dist - Pdist
-            self.delta_y= dist * math.tan(self.calculateAngleX(pos)) - Pdist * math.tan(self.calculateAngleX(self.lastPosition))
+            self.x_dir = centerX - PcenterX
+            self.y_dir = centerY - PcenterY
             # distance changed to much
-            # if abs(dist-Pdist)>0.5:
-            #     print("2")
-            #     return False
-            # # location changed to much (5 is arbitrary)
-            # if abs(x_dir)>(self.pictureWidth /5):
-            #     print("3")
-            #     return False
-            # if abs(y_dir)>(self.pictureHeight/5):
-            #     print("4")
-            #     return False
+            if abs(dist-Pdist)>0.5:
+                print("2")
+                return False
+            # location changed to much (5 is arbitrary)
+            if abs(centerX - PcenterX)>(self.pictureWidth /2):
+                print("3")
+                return False
+            if abs(centerY - PcenterY)>(self.pictureHeight/2):
+                print("4")
+                return False
         return True
 
     def calculateAngleX(self, pos):
@@ -245,7 +251,12 @@ class visualTracker():
             if self.lastPosition is None:
                 self.infoPublisher.publish('No_people')
             else:
-                self.infoPublisher.publish('Loss_target')
+                if self.loss_target_count == 5:
+                    self.loss_target_count = 0
+                    self.lastPosition = None
+                else:
+                    self.infoPublisher.publish('Loss_target')
+                    self.loss_target_count += 1
         else:
             self.infoPublisher.publish('People_detected')
             self.tracker(pred, im, img, depthFrame)

@@ -10,15 +10,15 @@
   <arg name="scan_topic" default="/scan"/>
  
   <!-- Map server ：加载地图文件 -->
-  <!-- <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)"/> -->
+  <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)"/>
   
   <!-- AMCL ：定位 -->
-  <!-- <include file="$(find turtlebot3_navigation)/launch/amcl.launch"/> -->
-  <!-- <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" /> -->
-  <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher" args="-0.064 0 0.122 0 0 0 base_link base_scan" />
+  <include file="$(find turtlebot3_navigation)/launch/amcl.launch"/>
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+  <!-- <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher" args="-0.064 0 0.122 0 0 0 base_link base_scan" /> -->
   <!-- move_base ：机器人运动-->
     <!--move_base参数配置http://wiki.ros.org/move_base -->
-  <!-- <include file="$(find turtlebot3_navigation)/launch/move_base.launch"/> -->
+  <include file="$(find turtlebot3_navigation)/launch/move_base.launch"/>
   <!-- <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
     <param name="base_local_planner" value="dwa_local_planner/DWAPlannerROS" />
     <rosparam file="$(find turtlebot3_navigation)/param/costmap_common_params_$(arg model).yaml" command="load" ns="global_costmap" />
