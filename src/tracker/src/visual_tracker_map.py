@@ -71,8 +71,7 @@ class visualTracker():
         self.half = half
         self.deepsort = deepsort
         self.yolo = yolo
-        self.x_dir, self.y_dir = 0, 0
-        self.rate = rospy.Rate(1)  # 设置发布频率为1Hz
+        self.rate = rospy.Rate(5)  # 设置发布频率为10Hz
         # self.realsense = realsense
         self.imgsz = 640
         self.names = self.yolo.module.names if hasattr(self.yolo, 'module') else self.yolo.names
@@ -80,7 +79,6 @@ class visualTracker():
 
         self.rate = rospy.Rate(10)
         self.bridge = CvBridge()
-        self.loss_target_count = 0
         self.pictureHeight = rospy.get_param('~pictureDimensions/pictureHeight')
         self.pictureWidth = rospy.get_param('~pictureDimensions/pictureWidth')
         vertAngle =rospy.get_param('~pictureDimensions/verticalAngle')
@@ -104,8 +102,9 @@ class visualTracker():
         '''
         self.timeSynchronizer = message_filters.ApproximateTimeSynchronizer([image_sub, dep_sub], 10, 0.5)
         self.timeSynchronizer.registerCallback(self.detector_tracker)
-        self.positionPublisher = rospy.Publisher('/object_tracker/current_position', PositionMsg, queue_size=3)
-        self.infoPublisher = rospy.Publisher('/object_tracker/info', StringMsg, queue_size=3)
+        self.positionPublisher = rospy.Publisher('current_position', PositionMsg, queue_size=3)
+        self.infoPublisher = rospy.Publisher('tracker_info', StringMsg, queue_size=3)
+        self.predictor_sub = rospy.Subscriber('predictor_info', StringMsg, self.predictor_status_callback)
         self.image_pub = rospy.Publisher("cv_bridge_image", Image, queue_size=1)
         # self.deltaPublisher = rospy.Publisher('/object_tracker/delta_Info', DeltaMsg, queue_size=3)
 
@@ -113,6 +112,11 @@ class visualTracker():
         if msg.status.status == 3:
             self.lastPosition = None
             rospy.loginfo("Move_base execution succeeded!")
+
+    def predictor_status_callback(self, msg):
+        if msg.data == 'predictor_finished':
+            rospy.logwarn('predict_finish')
+            self.lastPosition = None
             
     def publishPosition(self, pos):
         # calculate the angles from the raw position
@@ -121,7 +125,7 @@ class visualTracker():
         # publish the position (angleX, angleY, distance)
         posMsg = PositionMsg(angleX, angleY, pos[0][0], pos[0][1], pos[1])
         self.positionPublisher.publish(posMsg)
-        self.rate.sleep()
+        # self.rate.sleep()
 
     def checkPosPlausible(self, pos):
         '''Checks if a position is plausible. i.e. close enough to the last one.'''
@@ -131,19 +135,17 @@ class visualTracker():
         if self.lastPosition is not None:
             # unpack positions
             ((PcenterX, PcenterY), Pdist)=self.lastPosition
-            self.x_dir = centerX - PcenterX
-            self.y_dir = centerY - PcenterY
-            # distance changed to much
-            if abs(dist-Pdist)>0.5:
-                print("2")
-                return False
-            # location changed to much (5 is arbitrary)
-            if abs(centerX - PcenterX)>(self.pictureWidth /2):
-                print("3")
-                return False
-            if abs(centerY - PcenterY)>(self.pictureHeight/2):
-                print("4")
-                return False
+            # # distance changed to much
+            # if abs(dist-Pdist)>0.5:
+            #     print("2")
+            #     return False
+            # # location changed to much (5 is arbitrary)
+            # if abs(centerX - PcenterX)>(self.pictureWidth /2):
+            #     print("3")
+            #     return False
+            # if abs(centerY - PcenterY)>(self.pictureHeight/2):
+            #     print("4")
+            #     return False
         return True
 
     def calculateAngleX(self, pos):
@@ -193,9 +195,10 @@ class visualTracker():
 
         # get the average of all valid points (average to have a more reliable distance measure)
         depthArray = depthObject[~np.isnan(depthObject)]
-        averageDistance = np.mean(depthArray)
-
-        if len(depthArray) == 0:
+        if len(depthArray) > 0:
+            averageDistance = np.mean(depthArray)
+        else:
+            averageDistance = 0
             rospy.logwarn('empty depth array. all depth values are nan')
 
         return (center, averageDistance)
@@ -250,13 +253,10 @@ class visualTracker():
         if len(pred[0]) == 0:
             if self.lastPosition is None:
                 self.infoPublisher.publish('No_people')
+                self.rate.sleep()
             else:
-                if self.loss_target_count == 5:
-                    self.loss_target_count = 0
-                    self.lastPosition = None
-                else:
-                    self.infoPublisher.publish('Loss_target')
-                    self.loss_target_count += 1
+                self.infoPublisher.publish('Loss_target')
+                self.rate.sleep()
         else:
             self.infoPublisher.publish('People_detected')
             self.tracker(pred, im, img, depthFrame)

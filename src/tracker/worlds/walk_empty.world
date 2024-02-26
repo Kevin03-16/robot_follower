@@ -64,7 +64,7 @@
          change their destination. The <target_weight> can be used to
          tune the vector field used by the ActorPlugin to control the Actor. -->
     <actor name="actor1">
-      <pose>-2 5 0 0 0 0</pose>
+      <pose>1 7 0 0 0 0</pose>
       <skin>
         <filename>walk.dae</filename>
         <scale>1.0</scale>
